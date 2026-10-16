@@ -1,0 +1,34 @@
+{
+  "version": "1.0",
+  "updated_at": "2026-10-16T17:20:53.690Z",
+  "contributor": {
+    "username": "hiteshbandhu",
+    "profile_url": "https://github.com/hiteshbandhu",
+    "name": "Hitesh Bandhu",
+    "email": "bandhuhitesh52003@gmail.com",
+    "bio": "i manipulate language models, build and experiment with them",
+    "location": "Chandigarh, India",
+    "website": "",
+    "twitter": "_hiteshbandhu"
+  },
+  "contributions": [
+    {
+      "repo": "CapSoftware/Cap",
+      "pr_number": 2543,
+      "pr_title": "perf(desktop-gpui): skip still re-renders for annotation-only screenshot edits (−95–98% CPU while annotating)",
+      "pr_url": "https://github.com/CapSoftware/Cap/pull/2543",
+      "pr_body": "**What it fixes**\n\nEvery annotation edit in the screenshot editor sent the whole `ProjectConfiguration` to `run_still_renderer`. That includes each tick of the stroke width, opacity and mask level sliders, every colour change, and every committed stroke, move, resize, paste or delete. Each send triggered a full render of the still on the GPU, a readback of the padded frame, `frame_buffers` (unpad, clone and swap to BGRA), a new `RenderImage` for gpui to upload, and `drop_image` on the old one.\n\nThe still renderer never reads `annotations`. They are painted as gpui overlays in the editor and composited by `screenshot_export::composite` on export. So all of that work produced a frame that was byte-for-byte the frame already on screen.\n\n`publish()` now goes through a small `RenderInputGate`. It keys the config with `annotations` taken out (plus `hidden_text_segments`, which is `skip_serializing`) and only sends when that key changes. Padding, crop, background, border, shadow and undo/redo of those still render exactly as before. Annotation edits still record history, save, and refresh the mask overlays; they no longer kick the GPU.\n\nUsers feel this as slider drags and annotation edits that no longer stutter on large Retina or 4K screenshots. It also takes the renderer's ~33 MB-per-tick readback and upload churn off the machine while annotating.\n\n**Benchmark** (120-tick stroke-width slider drag at 60 Hz through the real `run_still_renderer` and the editor's `frame_buffers` pump; process CPU from `getrusage` over the drag plus a 750 ms drain; median of 3 runs on a GitHub `macos-latest` runner, Apple M1 (Virtual), Metal)\n\n| still | renders (before → after) | process CPU over the drag | CPU per tick | median edit-to-frame before |\n| --- | ---: | ---: | ---: | ---: |\n| 1920×1080 | 119 → 0 | 735 ms → 36 ms (−95%) | 6.13 → 0.30 ms | 11.5 ms |\n| 3024×1964 | 120 → 0 | 1655 ms → 39 ms (−98%) | 13.79 → 0.32 ms | 20.3 ms |\n| 3840×2160 | 118 → 0 | 1840 ms → 31 ms (−98%) | 15.33 → 0.26 ms | 23.7 ms |\n\nAfter the change, what's left of the \"after\" CPU is the benchmark's own 60 Hz loop and tokio idling; the gate check itself is a serde serialization of the config.\n\nGPU time and gpui's atlas upload of each new frame aren't in the CPU column, so the real saving is larger. Before the change, the renderer was busy for the whole drag (the 4K edit-to-frame time is longer than the 16.7 ms tick).\n\n```bash\ncd apps/desktop-gpui\ncargo test --bin cap-gpui benchmark_annotation_slider_drag -- --ignored --nocapture\n```\n\n\"Before\" is the same drag with every tick published, which is what `publish()` did on `main` (f6164c1). \"After\" is the drag through `RenderInputGate`.\n\n<details><summary>All three runs</summary>\n\n| run | still | main renders / CPU | gated renders / CPU |\n| --- | --- | ---: | ---: |\n| 1 | 1920×1080 | 112 / 735 ms | 0 / 29 ms |\n| 1 | 3024×1964 | 120 / 1694 ms | 0 / 27 ms |\n| 1 | 3840×2160 | 113 / 2281 ms | 0 / 24 ms |\n| 2 | 1920×1080 | 119 / 605 ms | 0 / 36 ms |\n| 2 | 3024×1964 | 120 / 1194 ms | 0 / 42 ms |\n| 2 | 3840×2160 | 118 / 1840 ms | 0 / 31 ms |\n| 3 | 1920×1080 | 120 / 844 ms | 0 / 37 ms |\n| 3 | 3024×1964 | 117 / 1655 ms | 0 / 39 ms |\n| 3 | 3840×2160 | 119 / 1711 ms | 0 / 38 ms |\n\n</details>\n\n**Checks**\n\n- New unit tests:\n  - annotation-only edits (stroke width, colour, adding and clearing annotations) never pass the gate;\n  - padding, rounding, background and `hidden_text_segments` changes always do, even when combined with an annotation edit;\n  - annotations stay on the project after the check;\n  - a freshly loaded editor sends its first config.\n- `cargo test --bin cap-gpui`: 1081 passed. `cargo test -p cap-gpui-kernels`: 22 passed.\n- `cargo fmt --check` is clean.\n- `cargo clippy --bin cap-gpui --all-targets -- -D warnings` (1.95.0) reports nothing in `screenshot_editor.rs`. The errors it does report are pre-existing ones in files this PR doesn't touch (`editor_clips.rs`, `editor_crop.rs`, `editor_edits.rs`, `editor_window.rs`, `editor_timeline.rs`, `editor_sidebar/animated_gradient.rs`, `updates.rs`, `diagnostics.rs`).\n- `screenshot_export` still gets the full config, annotations included, through `ExportRequest::Render`, so copy and save output is unchanged.\n\n\n\n\n<!-- greptile_comment -->\n\n<!-- greptile_summary -->\n\n<h2><a href=\"https://app.greptile.com/api/retrigger?id=80391512\"><picture><source media=\"(prefers-color-scheme: dark)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/RetriggerDark.svg?v=2\"><source media=\"(prefers-color-scheme: light)\" srcset=\"https://greptile-static-assets.s3.amazonaws.com/badges/Retrigger.svg?v=2\"><img alt=\"Retrigger\" src=\"https://greptile-static-assets.s3.amazonaws.com/badges/Retrigger.svg?v=2\" align=\"right\"></picture></a>Confidence Score: 5/5</h2>\n\n<!-- greptile-impact-verdict --> The PR appears safe to merge, with the Windows test-build issue addressed.\n\n<h3>Summary</h3>\n\nThe PR skips still-image rendering when only annotations change. It adds gate tests and an ignored GPU benchmark.\n\n- Annotation edits no longer send duplicate frames to the still renderer.\n\n<!-- greptile_confidence_score:5 -->\n\n<sub>Reviews (2) · Last reviewed commit: [\"test(desktop-gpui): read benchmark CPU t...\"](https://github.com/capsoftware/cap/commit/3d99e55da39b8376eabeb16d9f1a17261dccc5b8) · [Reviewed by Greptile](https://www.greptile.com/?utm_source=greptile_expert&utm_medium=github&utm_campaign=code_reviews&utm_content=capsoftware/cap)</sub>\n\n<!-- /greptile_comment -->",
+      "merged_at": "2026-10-14T04:49:34Z",
+      "language": "Rust",
+      "repo_stars": 23368,
+      "repo_description": "Open source Loom alternative. Beautiful, shareable screen recordings.",
+      "labels": [],
+      "additions": 332,
+      "deletions": 0,
+      "files_changed": 1,
+      "reviewers": [],
+      "merged_by": "richiemcilroy",
+      "showcase": true
+    }
+  ]
+}
